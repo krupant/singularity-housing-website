@@ -12,6 +12,7 @@ const INCLUDE_PATTERNS = [
   'shared',
   'scripts',
   'public',
+  'attached_assets',
   'index.html',
   'package.json',
   'tsconfig.json',
@@ -32,7 +33,16 @@ const EXCLUDE_PATTERNS = [
   'replit.nix',
   '.config',
   'generated-icon.png',
+  'stock_images',
 ];
+
+// Binary file extensions
+const BINARY_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.mp4', '.mp3', '.pdf', '.zip', '.woff', '.woff2', '.ttf', '.eot'];
+
+function isBinaryFile(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return BINARY_EXTENSIONS.includes(ext);
+}
 
 function shouldInclude(filePath: string): boolean {
   const parts = filePath.split('/');
@@ -47,8 +57,8 @@ function shouldInclude(filePath: string): boolean {
   return INCLUDE_PATTERNS.includes(root);
 }
 
-function getAllFiles(dir: string, baseDir: string = ''): { path: string; content: string }[] {
-  const files: { path: string; content: string }[] = [];
+function getAllFiles(dir: string, baseDir: string = ''): { path: string; content: string; isBinary: boolean }[] {
+  const files: { path: string; content: string; isBinary: boolean }[] = [];
   
   try {
     const items = fs.readdirSync(dir);
@@ -67,10 +77,18 @@ function getAllFiles(dir: string, baseDir: string = ''): { path: string; content
         files.push(...getAllFiles(fullPath, relativePath));
       } else if (stat.isFile()) {
         try {
-          const content = fs.readFileSync(fullPath, 'utf-8');
-          files.push({ path: relativePath, content });
+          const isBinary = isBinaryFile(fullPath);
+          if (isBinary) {
+            // Read binary files as base64
+            const content = fs.readFileSync(fullPath).toString('base64');
+            files.push({ path: relativePath, content, isBinary: true });
+          } else {
+            // Read text files normally
+            const content = fs.readFileSync(fullPath, 'utf-8');
+            files.push({ path: relativePath, content, isBinary: false });
+          }
         } catch (e) {
-          console.log(`Skipping binary file: ${relativePath}`);
+          console.log(`Skipping file: ${relativePath}`);
         }
       }
     }
@@ -82,7 +100,7 @@ function getAllFiles(dir: string, baseDir: string = ''): { path: string; content
 }
 
 async function initializeRepo(octokit: any, owner: string) {
-  console.log('📝 Initializing repository with README...');
+  console.log('📝 Checking repository state...');
   
   try {
     await octokit.repos.createOrUpdateFileContents({
@@ -93,14 +111,12 @@ async function initializeRepo(octokit: any, owner: string) {
       content: Buffer.from('# Singularity Housing Website\n\nProfessional website for Singularity Housing, LLC').toString('base64'),
     });
     console.log('✓ Repository initialized');
-    
-    // Wait a moment for GitHub to process
     await new Promise(resolve => setTimeout(resolve, 2000));
   } catch (e: any) {
     if (e.status !== 422) {
       throw e;
     }
-    console.log('Repository already initialized');
+    console.log('✓ Repository already initialized');
   }
 }
 
@@ -118,7 +134,9 @@ async function pushToGitHub() {
     // Get all files
     console.log('\n📂 Collecting files...');
     const files = getAllFiles('.');
-    console.log(`Found ${files.length} files to push`);
+    const textFiles = files.filter(f => !f.isBinary);
+    const binaryFiles = files.filter(f => f.isBinary);
+    console.log(`Found ${files.length} files (${textFiles.length} text, ${binaryFiles.length} binary)`);
     
     // Get the current main branch SHA
     console.log('\n🔍 Getting current branch state...');
@@ -142,13 +160,16 @@ async function pushToGitHub() {
     let count = 0;
     for (const file of files) {
       count++;
-      process.stdout.write(`  [${count}/${files.length}] ${file.path}...`);
+      const fileType = file.isBinary ? '(binary)' : '(text)';
+      process.stdout.write(`  [${count}/${files.length}] ${file.path} ${fileType}...`);
+      
       const blob = await octokit.git.createBlob({
         owner,
         repo: REPO_NAME,
-        content: Buffer.from(file.content).toString('base64'),
+        content: file.isBinary ? file.content : Buffer.from(file.content).toString('base64'),
         encoding: 'base64',
       });
+      
       treeItems.push({
         path: file.path,
         mode: '100644',
@@ -172,7 +193,7 @@ async function pushToGitHub() {
     const commitData: any = {
       owner,
       repo: REPO_NAME,
-      message: 'Singularity Housing website - Full codebase\n\nProfessional website for Singularity Housing, LLC featuring:\n- Modern minimalist design with Sage & Ink color scheme\n- WCAG AA accessibility compliance\n- Responsive layout with 3D shadow effects\n- Interactive animations throughout',
+      message: 'Add all project files including images\n\nIncludes:\n- All source code files\n- Image assets from attached_assets folder\n- Configuration files',
       tree: tree.data.sha,
     };
     
