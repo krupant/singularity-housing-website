@@ -24,6 +24,9 @@ const INCLUDE_PATTERNS = [
   '.gitignore',
 ];
 
+// Root-level file extensions to include
+const ROOT_BINARY_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.mp4'];
+
 // Files and directories to exclude
 const EXCLUDE_PATTERNS = [
   'node_modules',
@@ -54,6 +57,15 @@ function shouldInclude(filePath: string): boolean {
   }
   
   const root = parts[0];
+  
+  // Check if it's a root-level binary file
+  if (parts.length === 1) {
+    const ext = path.extname(filePath).toLowerCase();
+    if (ROOT_BINARY_EXTENSIONS.includes(ext)) {
+      return true;
+    }
+  }
+  
   return INCLUDE_PATTERNS.includes(root);
 }
 
@@ -163,12 +175,36 @@ async function pushToGitHub() {
       const fileType = file.isBinary ? '(binary)' : '(text)';
       process.stdout.write(`  [${count}/${files.length}] ${file.path} ${fileType}...`);
       
-      const blob = await octokit.git.createBlob({
-        owner,
-        repo: REPO_NAME,
-        content: file.isBinary ? file.content : Buffer.from(file.content).toString('base64'),
-        encoding: 'base64',
-      });
+      // Retry logic with exponential backoff
+      let retries = 3;
+      let delay = 1000;
+      let blob: any;
+      
+      while (retries > 0) {
+        try {
+          blob = await octokit.git.createBlob({
+            owner,
+            repo: REPO_NAME,
+            content: file.isBinary ? file.content : Buffer.from(file.content).toString('base64'),
+            encoding: 'base64',
+          });
+          break;
+        } catch (e: any) {
+          if (e.status === 403 && e.message.includes('rate limit')) {
+            retries--;
+            if (retries > 0) {
+              console.log(` (rate limited, waiting ${delay/1000}s...)`);
+              await new Promise(r => setTimeout(r, delay));
+              delay *= 2;
+              process.stdout.write(`  [${count}/${files.length}] ${file.path} ${fileType}...`);
+            } else {
+              throw e;
+            }
+          } else {
+            throw e;
+          }
+        }
+      }
       
       treeItems.push({
         path: file.path,
@@ -177,6 +213,11 @@ async function pushToGitHub() {
         sha: blob.data.sha,
       });
       console.log(' ✓');
+      
+      // Add small delay between requests to avoid rate limiting
+      if (count % 10 === 0) {
+        await new Promise(r => setTimeout(r, 500));
+      }
     }
     
     // Create tree
